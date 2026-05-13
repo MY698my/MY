@@ -1,0 +1,209 @@
+import os
+import re
+import json
+import requests
+from bs4 import BeautifulSoup
+from openai import OpenAI
+from dotenv import load_dotenv
+import pandas as pd
+
+# 加载环境变量（如果你用OpenAI API）
+load_dotenv()
+
+# ===================== 配置区 =====================
+# 1. PubMed文献检索API（生物信息学专用，无需密钥）
+PUBMED_API_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+
+# 2. AI大模型配置（可替换为本地模型/通义千问/文心一言）
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY", "你的API密钥"),
+    base_url="https://api.openai.com/v1"  # 国内可替换为代理地址
+)
+
+# 3. 研究关键词（生物信息学示例：肿瘤基因组学 + 单细胞测序）
+SEARCH_KEYWORD = "single-cell RNA sequencing cancer genomics bioinformatics"
+# ==================================================
+
+
+# ===================== Agent 1：文献检索 =====================
+def literature_search_agent(keyword, max_results=5):
+    """
+    从PubMed自动检索生物信息学相关文献
+    """
+    print(f"[文献检索Agent] 正在检索关键词：{keyword}")
+
+    # 1. 获取文献ID
+    search_url = f"{PUBMED_API_URL}esearch.fcgi?db=pubmed&term={keyword}&retmax={max_results}&retmode=json"
+    response = requests.get(search_url)
+    pmc_ids = response.json()["esearchresult"]["idlist"]
+
+    # 2. 获取文献摘要/正文
+    papers = []
+    for pmid in pmc_ids:
+        fetch_url = f"{PUBMED_API_URL}efetch.fcgi?db=pubmed&id={pmid}&retmode=xml&rettype=abstract"
+        xml_data = requests.get(fetch_url).text
+        soup = BeautifulSoup(xml_data, "xml")
+
+        # 解析标题、摘要、作者、期刊
+        title = soup.find("ArticleTitle").text if soup.find("ArticleTitle") else "无标题"
+        abstract = soup.find("AbstractText").text if soup.find("AbstractText") else "无摘要"
+        journal = soup.find("Title").text if soup.find("Title") else "无期刊"
+
+        papers.append({
+            "pmid": pmid,
+            "title": title,
+            "abstract": abstract,
+            "journal": journal
+        })
+
+    print(f"[文献检索Agent] 完成检索，共获取 {len(papers)} 篇文献")
+    return papers
+
+
+# ===================== Agent 2：关键信息提取 =====================
+def info_extract_agent(papers):
+    """
+    从文献中自动提取：研究背景、实验方法、核心数据、结论、局限性
+    """
+    print("[信息提取Agent] 正在结构化提取文献关键信息...")
+
+    extracted_data = []
+    for paper in papers:
+        prompt = f"""
+        你是专业的生物信息学科研助手，请从以下文献摘要中结构化提取信息：
+        
+        文献标题：{paper['title']}
+        文献摘要：{paper['abstract']}
+        
+        严格按照以下格式输出JSON，不要多余文字：
+        {{
+            "研究背景": "",
+            "实验方法": "",
+            "核心数据/结果": "",
+            "研究结论": "",
+            "局限性": ""
+        }}
+        """
+
+        # 调用AI模型
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+
+        result = response.choices[0].message.content
+        try:
+            info = json.loads(result)
+        except:
+            info = {"解析失败": result}
+
+        extracted_data.append({
+            "基础信息": paper,
+            "提取信息": info
+        })
+
+    print("[信息提取Agent] 信息提取完成")
+    return extracted_data
+
+
+# ===================== Agent 3：文献对比分析 =====================
+def compare_analysis_agent(extracted_data):
+    """
+    自动对比多篇文献：实验方法差异、技术优缺点、适用场景
+    """
+    print("[对比分析Agent] 正在进行多文献对比分析...")
+
+    all_abstracts = "\n\n".join([
+        f"文献{i + 1}：{item['基础信息']['title']}\n摘要：{item['基础信息']['abstract']}"
+        for i, item in enumerate(extracted_data)
+    ])
+
+    prompt = f"""
+    你是生物信息学专家，对比以下多篇单细胞测序/肿瘤基因组学文献，输出对比报告：
+    
+    {all_abstracts}
+    
+    输出要求：
+    1. 实验技术/方法对比
+    2. 各方法的优势与不足
+    3. 最适合生物信息学研究的方案推荐
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    report = response.choices[0].message.content
+    return report
+
+
+# ===================== Agent 4：实验方案优化 =====================
+def experiment_optimize_agent(compare_report):
+    """
+    根据文献分析结果，自动生成生物信息学实验流程、参数、分析脚本建议
+    """
+    print("[实验优化Agent] 正在生成科研实验方案...")
+
+    prompt = f"""
+    基于以下文献对比分析报告，为生物信息学科研实验生成可直接使用的方案：
+    
+    分析报告：
+    {compare_report}
+    
+    输出内容：
+    1. 实验流程设计
+    2. 关键分析参数建议
+    3. 标准分析步骤（单细胞测序/基因组学适用）
+    4. 实验记录模板
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+
+    plan = response.choices[0].message.content
+    return plan
+
+
+# ===================== 主流程：多Agent协作 =====================
+if __name__ == "__main__":
+    print("=" * 60)
+    print("  生物信息学科研文献分析Agent系统 启动")
+    print("=" * 60)
+
+    # 1. 检索文献
+    papers = literature_search_agent(SEARCH_KEYWORD, max_results=3)
+
+    # 2. 信息提取
+    extracted_papers = info_extract_agent(papers)
+
+    # 3. 对比分析
+    compare_report = compare_analysis_agent(extracted_papers)
+
+    # 4. 实验方案生成
+    experiment_plan = experiment_optimize_agent(compare_report)
+
+    # ===================== 输出结果 =====================
+    print("\n" + "=" * 80)
+    print("【最终输出：文献对比分析报告】")
+    print("=" * 80)
+    print(compare_report)
+
+    print("\n" + "=" * 80)
+    print("【最终输出：生物信息学实验优化方案】")
+    print("=" * 80)
+    print(experiment_plan)
+
+    # 保存结果到文件
+    with open("文献分析报告.txt", "w", encoding="utf-8") as f:
+        f.write("=== 文献对比分析报告 ===\n")
+        f.write(compare_report)
+        f.write("\n\n=== 实验优化方案 ===\n")
+        f.write(experiment_plan)
+
+    print("\n✅ 全部完成！结果已保存至：文献分析报告.txt")
